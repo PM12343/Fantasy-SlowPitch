@@ -116,4 +116,6 @@ def calculate_totals(team_list):
         "RBI": int(df["RBI"].sum()),
         "BB": int(df["BB"].sum()),
         "OB": int(df["OB"].sum()),
-        "PA": int
+        "PA": int(df["PA"].sum()),
+    }
+    totals["OBA"] = round(totals["
