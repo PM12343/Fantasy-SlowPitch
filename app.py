@@ -26,26 +26,27 @@ if "last_refresh" not in st.session_state:
 ROSTER_FILE = "my_team_roster.json"
 
 def scrape_and_process(url: str) -> pd.DataFrame:
-try:
-headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-resp = requests.get(url, headers=headers, timeout=20)
-resp.raise_for_status()
+    try:
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    resp = requests.get(url, headers=headers, timeout=20)
+    resp.raise_for_status()
 
-# Read all tables and take the first (main) one
-dfs = pd.read_html(StringIO(resp.text))
-df = dfs[0].copy()
+    # Read the table - take the first meaningful table
+    dfs = pd.read_html(StringIO(resp.text))
+    df = dfs[0].copy()
 
-# The page has 13 columns; we want only the first 12 meaningful ones
-if len(df.columns) >= 12:
-df = df.iloc[:, :12] # Keep first 12 columns
+    # USSSA table usually returns 13-14 columns (with empty + Team Stats)
+    # Keep only the first 12 meaningful columns: Rank to OBA
+    if len(df.columns) >= 12:
+    df = df.iloc[:, :12]
 
-# Assign clean column names (matches your required columns)
+# Assign exact column names
 df.columns = ["Rank", "Player", "Team", "OB-PA", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]
 
-# Clean OB-PA: remove ** bold markers and extra spaces
+# Clean OB-PA column (remove ** bold markers and extra spaces)
 df["OB-PA"] = df["OB-PA"].astype(str).str.replace(r"[\*\s]", "", regex=True).str.strip()
 
-# Split OB-PA into numeric OB and PA
+# Split OB-PA into numeric OB and PA (e.g., "292-352" → OB=292, PA=352)
 split = df["OB-PA"].str.split("-", expand=True)
 df["OB"] = pd.to_numeric(split[0], errors="coerce").fillna(0).astype(int)
 df["PA"] = pd.to_numeric(split[1], errors="coerce").fillna(0).astype(int)
@@ -55,15 +56,15 @@ numeric_cols = ["Rank", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]
 for col in numeric_cols:
 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-# Sort by Rank and reset index
-df = df.sort_values("Rank").reset_index(drop=True)
+# Sort by Rank
+df = df.sort_values(by="Rank").reset_index(drop=True)
 
-st.success(f"✅ Loaded {len(df)} players successfully!")
+st.success(f"✅ Successfully loaded {len(df)} players from USSSA!")
 return df
 
 except Exception as e:
 st.error(f"❌ Scraping error: {str(e)}")
-st.info("The USSSA page structure may have changed slightly. Try refreshing or check the URL.")
+st.info("Tip: The page structure can change. Try the Refresh button again.")
 return pd.DataFrame()
 def load_data(force_refresh=False):
     url = st.session_state.get("custom_url", DEFAULT_URL)
