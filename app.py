@@ -26,39 +26,35 @@ if "last_refresh" not in st.session_state:
 ROSTER_FILE = "my_team_roster.json"
 
 def scrape_and_process(url: str) -> pd.DataFrame:
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        
-        dfs = pd.read_html(StringIO(resp.text))
-        df = dfs[0]
-        
-        # Drop the final "Team Stats" link column if present
-        if len(df.columns) > 12:
-            df = df.iloc[:, :12].copy()
-        
-        # Exact column mapping to match USSSA page
-        df.columns = ["Rank", "Player", "Team", "OB-PA", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]
-        
-        # Clean OB-PA (sometimes comes with **bold** markdown)
-        df["OB-PA"] = df["OB-PA"].astype(str).str.replace(r"[\*\s]", "", regex=True).str.strip()
-        
-        # Split OB-PA into two numeric columns
-        split = df["OB-PA"].str.split("-", expand=True)
-        df["OB"] = pd.to_numeric(split[0], errors="coerce").fillna(0)
-        df["PA"] = pd.to_numeric(split[1], errors="coerce").fillna(0)
-        
-        # Convert all stats to numeric
-        numeric_cols = ["Rank", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-        
-        return df.sort_values("Rank").reset_index(drop=True)
-    except Exception as e:
-        st.error(f"❌ Scraping error: {e}")
-        return pd.DataFrame()
+try:
+headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+resp = requests.get(url, headers=headers, timeout=20)
+resp.raise_for_status()
 
+# Explicitly try lxml first, fallback to html5lib
+dfs = pd.read_html(StringIO(resp.text), flavor=['lxml', 'html5lib'])
+df = dfs[0]
+
+if len(df.columns) > 12:
+df = df.iloc[:, :12].copy()
+
+df.columns = ["Rank", "Player", "Team", "OB-PA", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]
+
+df["OB-PA"] = df["OB-PA"].astype(str).str.replace(r"[\*\s]", "", regex=True).str.strip()
+
+split = df["OB-PA"].str.split("-", expand=True)
+df["OB"] = pd.to_numeric(split[0], errors="coerce").fillna(0)
+df["PA"] = pd.to_numeric(split[1], errors="coerce").fillna(0)
+
+numeric_cols = ["Rank", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]
+for col in numeric_cols:
+df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+return df.sort_values("Rank").reset_index(drop=True)
+except Exception as e:
+st.error(f"❌ Scraping error: {str(e)}")
+st.info("Tip: Make sure lxml is in requirements.txt")
+return pd.DataFrame()
 def load_data(force_refresh=False):
     url = st.session_state.get("custom_url", DEFAULT_URL)
     if force_refresh or st.session_state.player_df is None or st.session_state.player_df.empty:
