@@ -31,29 +31,39 @@ headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 resp = requests.get(url, headers=headers, timeout=20)
 resp.raise_for_status()
 
-# Explicitly try lxml first, fallback to html5lib
-dfs = pd.read_html(StringIO(resp.text), flavor=['lxml', 'html5lib'])
-df = dfs[0]
+# Read all tables and take the first (main) one
+dfs = pd.read_html(StringIO(resp.text))
+df = dfs[0].copy()
 
-if len(df.columns) > 12:
-df = df.iloc[:, :12].copy()
+# The page has 13 columns; we want only the first 12 meaningful ones
+if len(df.columns) >= 12:
+df = df.iloc[:, :12] # Keep first 12 columns
 
+# Assign clean column names (matches your required columns)
 df.columns = ["Rank", "Player", "Team", "OB-PA", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]
 
+# Clean OB-PA: remove ** bold markers and extra spaces
 df["OB-PA"] = df["OB-PA"].astype(str).str.replace(r"[\*\s]", "", regex=True).str.strip()
 
+# Split OB-PA into numeric OB and PA
 split = df["OB-PA"].str.split("-", expand=True)
-df["OB"] = pd.to_numeric(split[0], errors="coerce").fillna(0)
-df["PA"] = pd.to_numeric(split[1], errors="coerce").fillna(0)
+df["OB"] = pd.to_numeric(split[0], errors="coerce").fillna(0).astype(int)
+df["PA"] = pd.to_numeric(split[1], errors="coerce").fillna(0).astype(int)
 
+# Convert other stats to numeric
 numeric_cols = ["Rank", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]
 for col in numeric_cols:
 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-return df.sort_values("Rank").reset_index(drop=True)
+# Sort by Rank and reset index
+df = df.sort_values("Rank").reset_index(drop=True)
+
+st.success(f"✅ Loaded {len(df)} players successfully!")
+return df
+
 except Exception as e:
 st.error(f"❌ Scraping error: {str(e)}")
-st.info("Tip: Make sure lxml is in requirements.txt")
+st.info("The USSSA page structure may have changed slightly. Try refreshing or check the URL.")
 return pd.DataFrame()
 def load_data(force_refresh=False):
     url = st.session_state.get("custom_url", DEFAULT_URL)
