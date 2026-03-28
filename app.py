@@ -8,7 +8,6 @@ from datetime import datetime
 
 st.set_page_config(page_title="USSSA Fantasy Slow-Pitch", page_icon="🥎", layout="wide")
 
-# USSSA green theme
 st.markdown("""
     <style>
     .stApp { background-color: #f0f8f0; }
@@ -107,6 +106,7 @@ def load_roster(file_path, session_key):
 def calculate_totals(team_list):
     if not team_list:
         return {"R": 0, "2B": 0, "3B": 0, "HR": 0, "RBI": 0, "BB": 0, "OB": 0, "PA": 0, "OBA": 0.000}
+    
     df = pd.DataFrame(team_list)
     totals = {
         "R": int(df["R"].sum()),
@@ -118,4 +118,56 @@ def calculate_totals(team_list):
         "OB": int(df["OB"].sum()),
         "PA": int(df["PA"].sum()),
     }
-    totals["OBA"] = round(totals["
+    totals["OBA"] = round(totals["OB"] / totals["PA"], 3) if totals["PA"] > 0 else 0.000
+    return totals
+
+def compare_teams(my_totals, opp_totals):
+    metrics = ["R", "2B", "3B", "HR", "RBI", "BB", "OBA"]
+    results = []
+    my_points = 0
+    opp_points = 0
+    
+    for m in metrics:
+        my_val = my_totals[m]
+        opp_val = opp_totals[m]
+        if my_val > opp_val:
+            winner = "You"
+            my_points += 1
+        elif opp_val > my_val:
+            winner = "Opponent"
+            opp_points += 1
+        else:
+            winner = "Tie"
+            my_points += 0.5
+            opp_points += 0.5
+        results.append({
+            "Metric": m,
+            "Your Team": my_val if m != "OBA" else f"{my_val:.3f}",
+            "Opponent": opp_val if m != "OBA" else f"{opp_val:.3f}",
+            "Winner": winner
+        })
+    return pd.DataFrame(results), my_points, opp_points
+
+# ====================== UI ======================
+st.title("🥎 USSSA Fantasy Slow-Pitch")
+st.caption("12-player rosters • 10-player Head-to-Head • Live USSSA stats")
+
+with st.sidebar:
+    st.header("⚙️ Settings")
+    st.text_input("Stats URL", value=DEFAULT_URL, key="custom_url")
+    
+    st.divider()
+    st.subheader("Roster Management")
+    if st.button("Load My 12-player Roster"):
+        load_roster(ROSTER_FILE, "my_team")
+    if st.button("Load Opponent 12-player Roster"):
+        load_roster(OPPONENT_MAIN_FILE, "opponent_main_team")
+    if st.button("Load My H2H Roster"):
+        load_roster(H2H_MY_FILE, "h2h_my_team")
+    if st.button("Load Opponent H2H Roster"):
+        load_roster(OPPONENT_H2H_FILE, "opponent_team")
+    
+    if st.button("Clear All Rosters"):
+        for key in ["my_team", "opponent_main_team", "h2h_my_team", "opponent_team"]:
+            st.session_state[key] = []
+        for f
