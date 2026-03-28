@@ -21,12 +21,19 @@ DEFAULT_URL = "https://web.usssa.com/sports/ConferenceUSSSA.asp?WTD=5&SA=1&State
 # Session state
 if "player_df" not in st.session_state:
     st.session_state.player_df = None
-if "my_team" not in st.session_state:
+if "my_team" not in st.session_state:           # 12-player main roster
     st.session_state.my_team = []
+if "h2h_my_team" not in st.session_state:       # NEW: 10-player H2H roster
+    st.session_state.h2h_my_team = []
+if "opponent_team" not in st.session_state:     # NEW: 10-player opponent roster
+    st.session_state.opponent_team = []
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = None
 
+# Roster files
 ROSTER_FILE = "my_team_roster.json"
+H2H_MY_FILE = "h2h_my_roster.json"
+OPPONENT_FILE = "opponent_roster.json"
 
 def scrape_and_process(url: str) -> pd.DataFrame:
     try:
@@ -34,62 +41,56 @@ def scrape_and_process(url: str) -> pd.DataFrame:
         resp = requests.get(url, headers=headers, timeout=20)
         resp.raise_for_status()
         
-        # Read all tables from the page
         dfs = pd.read_html(StringIO(resp.text))
-        
         if not dfs:
-            raise ValueError("No tables found on the page")
+            raise ValueError("No tables found")
         
-        # Select the largest table (main player stats ~480 rows)
+        # Use the largest table (main stats table)
         df = max(dfs, key=len).copy()
         
-        st.info(f"Found {len(dfs)} tables. Using largest with {len(df)} rows and {len(df.columns)} columns.")
-        
-        # The main table has 13 columns
+        # Current USSSA page returns 13 columns
         if len(df.columns) >= 13:
             df = df.iloc[:, :13]
         
-        # Assign realistic column names based on current USSSA structure
+        # Exact column mapping confirmed from live page
         df.columns = ["Rank", "Player", "Team", "OB-PA", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBP", "TeamLink"]
         
-        # Clean OB-PA column (remove ** bold markers and extra spaces)
+        # Clean OB-PA (remove bold ** markers)
         df["OB-PA"] = df["OB-PA"].astype(str).str.replace(r"[\*\s]", "", regex=True).str.strip()
         
-        # Split OB-PA into OB (hits) and PA (plate appearances / at-bats)
+        # Split into OB and PA
         split = df["OB-PA"].str.split("-", expand=True)
         df["OB"] = pd.to_numeric(split[0], errors="coerce").fillna(0).astype(int)
         df["PA"] = pd.to_numeric(split[1], errors="coerce").fillna(0).astype(int)
         
-        # Use OBP column as OBA (it's the on-base percentage)
+        # OBA comes from the OBP column
         df["OBA"] = pd.to_numeric(df["OBP"], errors="coerce").fillna(0)
         
-        # Convert other stats to numeric
+        # Numeric conversion
         numeric_cols = ["Rank", "R", "2B", "3B", "HR", "RBI", "BB", "HRF"]
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
         
-        # Remove repeated header rows (where "Rank" is literally the word "Rank" or non-numeric)
+        # Drop any repeated header rows
         if "Rank" in df.columns:
             df = df[pd.to_numeric(df["Rank"], errors="coerce").notna()].copy()
             df["Rank"] = df["Rank"].astype(int)
         
-        # Clean Player and Team names (remove HTML link artifacts if any remain)
+        # Clean any leftover markdown links in names
         df["Player"] = df["Player"].astype(str).str.replace(r'\[.*?\]\(.*?\)', '', regex=True).str.strip()
         df["Team"] = df["Team"].astype(str).str.replace(r'\[.*?\]\(.*?\)', '', regex=True).str.strip()
         
-        # Sort by Rank
         df = df.sort_values(by="Rank").reset_index(drop=True)
         
-        st.success(f"✅ Successfully loaded {len(df)} players from USSSA!")
+        st.success(f"✅ Loaded {len(df)} players")
         return df
         
     except Exception as e:
         st.error(f"❌ Scraping error: {str(e)}")
-        st.info("The page structure may have minor changes. Try Refresh again.")
-        if 'dfs' in locals():
-            st.info(f"Found {len(dfs)} tables on the page. Largest had {len(max(dfs, key=len))} rows.")
+        st.info("Try Refresh Live Data again.")
         return pd.DataFrame()
+
 def load_data(force_refresh=False):
     url = st.session_state.get("custom_url", DEFAULT_URL)
     if force_refresh or st.session_state.player_df is None or st.session_state.player_df.empty:
@@ -100,34 +101,94 @@ def load_data(force_refresh=False):
             st.toast("✅ Live data refreshed!", icon="🥎")
     return st.session_state.player_df
 
-def save_roster():
-    with open(ROSTER_FILE, "w") as f:
-        json.dump(st.session_state.my_team, f)
+def save_roster(file_path, team_list):
+    with open(file_path, "w") as f:
+        json.dump(team_list, f)
 
-def load_saved_roster():
-    if os.path.exists(ROSTER_FILE):
-        with open(ROSTER_FILE, "r") as f:
-            st.session_state.my_team = json.load(f)
-        st.toast("✅ Saved roster loaded!", icon="📂")
+def load_roster(file_path, session_key):
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            st.session_state[session_key] = json.load(f)
+        st.toast(f"✅ Loaded from {file_path}", icon="📂")
 
-# Main UI
+# ====================== NEW: Head-to-Head Helpers ======================
+def calculate_totals(team_list):
+    if not team_list:
+        return {"R": 0, "2B": 0, "3B": 0, "HR": 0, "RBI": 0, "BB": 0, "OB": 0, "PA": 0, "OBA": 0.000}
+    df = pd.DataFrame(team_list)
+    totals = {
+        "R": df["R"].sum(),
+        "2B": df["2B"].sum(),
+        "3B": df["3B"].sum(),
+        "HR": df["HR"].sum(),
+        "RBI": df["RBI"].sum(),
+        "BB": df["BB"].sum(),
+        "OB": df["OB"].sum(),
+        "PA": df["PA"].sum(),
+    }
+    totals["OBA"] = round(totals["OB"] / totals["PA"], 3) if totals["PA"] > 0 else 0.000
+    return totals
+
+def compare_teams(my_totals, opp_totals):
+    metrics = ["R", "2B", "3B", "HR", "RBI", "BB", "OBA"]
+    results = []
+    my_points = 0
+    opp_points = 0
+    
+    for m in metrics:
+        my_val = my_totals[m]
+        opp_val = opp_totals[m]
+        if my_val > opp_val:
+            winner = "You"
+            my_points += 1
+        elif opp_val > my_val:
+            winner = "Opponent"
+            opp_points += 1
+        else:
+            winner = "Tie"
+            my_points += 0.5
+            opp_points += 0.5
+        results.append({
+            "Metric": m,
+            "Your Team": my_val if m != "OBA" else f"{my_val:.3f}",
+            "Opponent": opp_val if m != "OBA" else f"{opp_val:.3f}",
+            "Winner": winner
+        })
+    
+    return pd.DataFrame(results), my_points, opp_points
+
+# ====================== MAIN UI ======================
 st.title("🥎 USSSA Fantasy Slow-Pitch")
-st.caption("Build your 12-player roster • Live stats from official USSSA Conference")
+st.caption("12-player roster • Live stats • NEW Head-to-Head Matchups")
 
-# Sidebar
 with st.sidebar:
     st.header("⚙️ Settings")
-    st.text_input("Stats URL (customize SeasonID, ClassID, etc.)", 
-                  value=DEFAULT_URL, key="custom_url")
-    if st.button("Load Saved Roster"):
-        load_saved_roster()
-    if st.button("Clear My Team"):
+    st.text_input("Stats URL", value=DEFAULT_URL, key="custom_url")
+    
+    st.divider()
+    st.subheader("Roster Management")
+    if st.button("Load Main 12-player Roster"):
+        load_roster(ROSTER_FILE, "my_team")
+    if st.button("Load My H2H Roster"):
+        load_roster(H2H_MY_FILE, "h2h_my_team")
+    if st.button("Load Opponent Roster"):
+        load_roster(OPPONENT_FILE, "opponent_team")
+    
+    if st.button("Clear All Rosters"):
         st.session_state.my_team = []
-        if os.path.exists(ROSTER_FILE):
-            os.remove(ROSTER_FILE)
+        st.session_state.h2h_my_team = []
+        st.session_state.opponent_team = []
+        for f in [ROSTER_FILE, H2H_MY_FILE, OPPONENT_FILE]:
+            if os.path.exists(f):
+                os.remove(f)
         st.rerun()
 
-tab_browser, tab_team, tab_dashboard = st.tabs(["📋 Player Browser", "👥 My Team", "📊 Team Dashboard"])
+tab_browser, tab_team, tab_dashboard, tab_h2h = st.tabs([
+    "📋 Player Browser", 
+    "👥 My Team (12)", 
+    "📊 Dashboard", 
+    "⚔️ Head-to-Head"
+])
 
 with tab_browser:
     df = load_data()
@@ -136,7 +197,7 @@ with tab_browser:
     
     col_search, col_refresh = st.columns([4, 1])
     with col_search:
-        search_term = st.text_input("🔍 Search by player or team", "")
+        search_term = st.text_input("🔍 Search player or team", "")
     with col_refresh:
         if st.button("🔄 Refresh Live Data", type="primary", use_container_width=True):
             load_data(force_refresh=True)
@@ -150,11 +211,10 @@ with tab_browser:
         )
         filtered = filtered[mask]
     
-    st.subheader(f"Available Players ({len(filtered)}) • {12 - len(st.session_state.my_team)} spots left")
+    st.subheader(f"Available Players ({len(filtered)}) • Main team: {12-len(st.session_state.my_team)} left")
     
     display_cols = ["Rank", "Player", "Team", "OB-PA", "OB", "PA", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]
     display_cols = [col for col in display_cols if col in filtered.columns]
-    
     filtered_display = filtered[display_cols].copy()
     filtered_display.insert(0, "Select", False)
     
@@ -162,83 +222,168 @@ with tab_browser:
         filtered_display,
         hide_index=True,
         use_container_width=True,
-        column_config={
-            "Select": st.column_config.CheckboxColumn("Add to Team", default=False),
-            "OB-PA": st.column_config.TextColumn("OB-PA"),
-            "OBA": st.column_config.NumberColumn("OBA", format="%.3f"),
-        }
+        column_config={"Select": st.column_config.CheckboxColumn("Select", default=False)}
     )
     
     selected_rows = edited[edited["Select"] == True]
     
-    if st.button("➕ Add Selected Players", type="primary", 
-                 disabled=len(st.session_state.my_team) >= 12 or len(selected_rows) == 0):
-        to_add = selected_rows.drop(columns=["Select"]).to_dict("records")
-        added_count = 0
-        for player in to_add:
-            if len(st.session_state.my_team) < 12 and player not in st.session_state.my_team:
-                st.session_state.my_team.append(player)
-                added_count += 1
-        save_roster()
-        if added_count > 0:
-            st.toast(f"Added {added_count} player(s)!", icon="✅")
-        st.rerun()
+    col_add1, col_add2 = st.columns(2)
+    with col_add1:
+        if st.button("➕ Add to Main 12-player Team", type="primary",
+                     disabled=len(st.session_state.my_team) >= 12 or len(selected_rows) == 0):
+            to_add = selected_rows.drop(columns=["Select"]).to_dict("records")
+            added = 0
+            for p in to_add:
+                if len(st.session_state.my_team) < 12 and p not in st.session_state.my_team:
+                    st.session_state.my_team.append(p)
+                    added += 1
+            save_roster(ROSTER_FILE, st.session_state.my_team)
+            st.toast(f"Added {added} to main team", icon="✅")
+            st.rerun()
+    
+    with col_add2:
+        if st.button("➕ Add to My H2H Team (10 max)", 
+                     disabled=len(st.session_state.h2h_my_team) >= 10 or len(selected_rows) == 0):
+            to_add = selected_rows.drop(columns=["Select"]).to_dict("records")
+            added = 0
+            for p in to_add:
+                if len(st.session_state.h2h_my_team) < 10 and p not in st.session_state.h2h_my_team:
+                    st.session_state.h2h_my_team.append(p)
+                    added += 1
+            save_roster(H2H_MY_FILE, st.session_state.h2h_my_team)
+            st.toast(f"Added {added} to H2H team", icon="✅")
+            st.rerun()
 
 with tab_team:
-    st.header("👥 My Team")
+    st.header("👥 My Main 12-Player Team")
     if not st.session_state.my_team:
-        st.info("Your roster is empty. Go to Player Browser to add players.")
+        st.info("Empty – use Player Browser to add players")
     else:
         team_df = pd.DataFrame(st.session_state.my_team)
-        display_team_cols = ["Rank", "Player", "Team", "OB-PA", "OB", "PA", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]
-        display_team_cols = [col for col in display_team_cols if col in team_df.columns]
-        st.dataframe(
-            team_df[display_team_cols],
-            use_container_width=True,
-            hide_index=True
-        )
-        
+        st.dataframe(team_df[["Rank", "Player", "Team", "OB-PA", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBA"]],
+                     use_container_width=True, hide_index=True)
         for i, player in enumerate(st.session_state.my_team):
             col1, col2 = st.columns([5, 1])
             with col1:
-                st.write(f"**{player.get('Rank', '')}** • {player.get('Player', '')} ({player.get('Team', '')})")
+                st.write(f"**{player.get('Rank','')}** • {player.get('Player','')} ({player.get('Team','')})")
             with col2:
-                if st.button("🗑️ Remove", key=f"remove_{i}"):
+                if st.button("🗑️ Remove", key=f"remove_main_{i}"):
                     st.session_state.my_team.pop(i)
-                    save_roster()
+                    save_roster(ROSTER_FILE, st.session_state.my_team)
                     st.rerun()
 
 with tab_dashboard:
-    st.header("📊 Real-Time Team Totals")
-    if len(st.session_state.my_team) == 0:
-        st.warning("No players yet — totals will appear once you build your roster.")
+    st.header("📊 Main Team Totals")
+    if not st.session_state.my_team:
+        st.warning("No players yet")
     else:
-        team_df = pd.DataFrame(st.session_state.my_team)
-        
-        totals = {
-            "R": team_df["R"].sum(),
-            "2B": team_df["2B"].sum(),
-            "3B": team_df["3B"].sum(),
-            "HR": team_df["HR"].sum(),
-            "RBI": team_df["RBI"].sum(),
-            "BB": team_df["BB"].sum(),
-            "OB": team_df["OB"].sum(),
-            "PA": team_df["PA"].sum(),
-        }
-        totals["OBA"] = round(totals["OB"] / totals["PA"], 3) if totals["PA"] > 0 else 0.000
-        
+        totals = calculate_totals(st.session_state.my_team)
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Runs (R)", int(totals["R"]))
-        c2.metric("Doubles (2B)", int(totals["2B"]))
-        c3.metric("Triples (3B)", int(totals["3B"]))
-        c4.metric("Home Runs (HR)", int(totals["HR"]))
-        
+        c1.metric("Runs (R)", int(totals["R"]))
+        c2.metric("2B", int(totals["2B"]))
+        c3.metric("3B", int(totals["3B"]))
+        c4.metric("HR", int(totals["HR"]))
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("RBI", int(totals["RBI"]))
         c2.metric("Walks (BB)", int(totals["BB"]))
-        c3.metric("Total OB / PA", f"{int(totals['OB']):,} / {int(totals['PA']):,}")
-        c4.metric("Team OBA", f"{totals['OBA']:.3f} ({totals['OBA']*100:.1f}%)")
-        
-        st.caption(f"Team size: **{len(st.session_state.my_team)}/12** • Last refreshed: {st.session_state.last_refresh.strftime('%Y-%m-%d %H:%M') if st.session_state.last_refresh else 'Never'}")
+        c3.metric("OB/PA", f"{int(totals['OB'])} / {int(totals['PA'])}")
+        c4.metric("OBA", f"{totals['OBA']:.3f}")
+        st.caption(f"Team size: **{len(st.session_state.my_team)}/12** • Last refreshed: {st.session_state.last_refresh}")
 
-st.caption("USSSA Fantasy Slow-Pitch • 12-player roster • Live stats scraping • Updated for current page structure")
+with tab_h2h:
+    st.header("⚔️ Head-to-Head Matchup (10-player teams)")
+    st.caption("Build your 10-player H2H team + opponent team → compare 7 categories (1 point each)")
+    
+    # Shared player browser for H2H (same filtered list as above but independent)
+    st.subheader("Select players for H2H (same live data)")
+    h2h_filtered = df.copy()
+    if search_term:  # reuse the search term from browser tab if it exists
+        mask = (
+            h2h_filtered["Player"].str.contains(search_term, case=False, na=False) |
+            h2h_filtered["Team"].str.contains(search_term, case=False, na=False)
+        )
+        h2h_filtered = h2h_filtered[mask]
+    
+    h2h_display = h2h_filtered[display_cols].copy()
+    h2h_display.insert(0, "Select", False)
+    h2h_edited = st.data_editor(
+        h2h_display,
+        hide_index=True,
+        use_container_width=True,
+        column_config={"Select": st.column_config.CheckboxColumn("Select", default=False)}
+    )
+    h2h_selected = h2h_edited[h2h_edited["Select"] == True]
+    
+    col_my, col_opp = st.columns(2)
+    with col_my:
+        if st.button("➕ Add Selected to MY H2H Team", type="primary",
+                     disabled=len(st.session_state.h2h_my_team) >= 10 or len(h2h_selected) == 0):
+            to_add = h2h_selected.drop(columns=["Select"]).to_dict("records")
+            added = 0
+            for p in to_add:
+                if len(st.session_state.h2h_my_team) < 10 and p not in st.session_state.h2h_my_team:
+                    st.session_state.h2h_my_team.append(p)
+                    added += 1
+            save_roster(H2H_MY_FILE, st.session_state.h2h_my_team)
+            st.toast(f"Added {added} to your H2H team", icon="✅")
+            st.rerun()
+    
+    with col_opp:
+        if st.button("➕ Add Selected to OPPONENT Team", type="secondary",
+                     disabled=len(st.session_state.opponent_team) >= 10 or len(h2h_selected) == 0):
+            to_add = h2h_selected.drop(columns=["Select"]).to_dict("records")
+            added = 0
+            for p in to_add:
+                if len(st.session_state.opponent_team) < 10 and p not in st.session_state.opponent_team:
+                    st.session_state.opponent_team.append(p)
+                    added += 1
+            save_roster(OPPONENT_FILE, st.session_state.opponent_team)
+            st.toast(f"Added {added} to opponent team", icon="✅")
+            st.rerun()
+    
+    # Display both teams side-by-side
+    col_left, col_right = st.columns(2)
+    with col_left:
+        st.subheader("Your H2H Team")
+        if st.session_state.h2h_my_team:
+            st.dataframe(pd.DataFrame(st.session_state.h2h_my_team)[["Rank","Player","Team","OB-PA","OBA"]],
+                         use_container_width=True, hide_index=True)
+            for i, p in enumerate(st.session_state.h2h_my_team):
+                if st.button("🗑️ Remove", key=f"h2h_my_{i}"):
+                    st.session_state.h2h_my_team.pop(i)
+                    save_roster(H2H_MY_FILE, st.session_state.h2h_my_team)
+                    st.rerun()
+        else:
+            st.info("Empty – add players above")
+    
+    with col_right:
+        st.subheader("Opponent Team")
+        if st.session_state.opponent_team:
+            st.dataframe(pd.DataFrame(st.session_state.opponent_team)[["Rank","Player","Team","OB-PA","OBA"]],
+                         use_container_width=True, hide_index=True)
+            for i, p in enumerate(st.session_state.opponent_team):
+                if st.button("🗑️ Remove", key=f"opp_{i}"):
+                    st.session_state.opponent_team.pop(i)
+                    save_roster(OPPONENT_FILE, st.session_state.opponent_team)
+                    st.rerun()
+        else:
+            st.info("Empty – add players above")
+    
+    # Comparison
+    if st.button("🔥 Compare Teams & Calculate Score", type="primary", use_container_width=True):
+        if len(st.session_state.h2h_my_team) == 0 or len(st.session_state.opponent_team) == 0:
+            st.warning("Both teams need at least 1 player to compare")
+        else:
+            my_totals = calculate_totals(st.session_state.h2h_my_team)
+            opp_totals = calculate_totals(st.session_state.opponent_team)
+            comparison_df, my_pts, opp_pts = compare_teams(my_totals, opp_totals)
+            
+            st.subheader("🏆 Head-to-Head Results")
+            st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+            
+            winner_text = "You Win!" if my_pts > opp_pts else "Opponent Wins!" if opp_pts > my_pts else "It's a Tie!"
+            st.metric("FINAL SCORE", f"You {my_pts} – {opp_pts} Opponent", f"{winner_text}")
+            
+            st.caption("Higher wins each category • 1 point per metric • Ties split 0.5")
+
+st.caption("USSSA Fantasy Slow-Pitch • Live scraping • 12-player + 10-player H2H mode")
