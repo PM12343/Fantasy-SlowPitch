@@ -34,51 +34,51 @@ def scrape_and_process(url: str) -> pd.DataFrame:
         resp = requests.get(url, headers=headers, timeout=20)
         resp.raise_for_status()
         
-        # Read all tables
+        # Read all tables from the page
         dfs = pd.read_html(StringIO(resp.text))
         
         if not dfs:
             raise ValueError("No tables found on the page")
         
-        # Select the largest table (main player stats)
+        # Select the largest table (main player stats ~480 rows)
         df = max(dfs, key=len).copy()
         
-        # USSSA often has 13-14 columns with empties and links
-        if len(df.columns) >= 12:
-            df = df.iloc[:, :12]
+        st.info(f"Found {len(dfs)} tables. Using largest with {len(df)} rows and {len(df.columns)} columns.")
         
-        # Assign clean column names (adjust if exact count changes)
-        expected_cols = ["Rank", "Player", "Team", "empty1", "OB-PA", "R", "2B", "3B", "HR", "RBI", "BB", "HRF"]
-        if len(df.columns) > len(expected_cols):
-            df = df.iloc[:, :len(expected_cols)]
-        df.columns = expected_cols[:len(df.columns)]
+        # The main table has 13 columns
+        if len(df.columns) >= 13:
+            df = df.iloc[:, :13]
         
-        # Clean OB-PA (remove ** bold markers)
+        # Assign realistic column names based on current USSSA structure
+        df.columns = ["Rank", "Player", "Team", "OB-PA", "R", "2B", "3B", "HR", "RBI", "BB", "HRF", "OBP", "TeamLink"]
+        
+        # Clean OB-PA column (remove ** bold markers and extra spaces)
         df["OB-PA"] = df["OB-PA"].astype(str).str.replace(r"[\*\s]", "", regex=True).str.strip()
         
-        # Split OB-PA into OB and PA
+        # Split OB-PA into OB (hits) and PA (plate appearances / at-bats)
         split = df["OB-PA"].str.split("-", expand=True)
         df["OB"] = pd.to_numeric(split[0], errors="coerce").fillna(0).astype(int)
         df["PA"] = pd.to_numeric(split[1], errors="coerce").fillna(0).astype(int)
         
-        # Convert numeric columns
+        # Use OBP column as OBA (it's the on-base percentage)
+        df["OBA"] = pd.to_numeric(df["OBP"], errors="coerce").fillna(0)
+        
+        # Convert other stats to numeric
         numeric_cols = ["Rank", "R", "2B", "3B", "HR", "RBI", "BB", "HRF"]
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
         
-        # Add OBA if missing (calculate from OB/PA)
-        if "OBA" not in df.columns and "OB" in df.columns and "PA" in df.columns:
-            df["OBA"] = (df["OB"] / df["PA"]).round(3).fillna(0)
-        elif "OBA" in df.columns or "OBP" in df.columns:
-            oba_col = "OBA" if "OBA" in df.columns else "OBP"
-            df["OBA"] = pd.to_numeric(df[oba_col], errors="coerce").fillna(0)
-        
-        # Drop any header repetition rows (where Rank is not numeric)
+        # Remove repeated header rows (where "Rank" is literally the word "Rank" or non-numeric)
         if "Rank" in df.columns:
-            df = df[pd.to_numeric(df["Rank"], errors="coerce").notna()]
+            df = df[pd.to_numeric(df["Rank"], errors="coerce").notna()].copy()
             df["Rank"] = df["Rank"].astype(int)
         
+        # Clean Player and Team names (remove HTML link artifacts if any remain)
+        df["Player"] = df["Player"].astype(str).str.replace(r'\[.*?\]\(.*?\)', '', regex=True).str.strip()
+        df["Team"] = df["Team"].astype(str).str.replace(r'\[.*?\]\(.*?\)', '', regex=True).str.strip()
+        
+        # Sort by Rank
         df = df.sort_values(by="Rank").reset_index(drop=True)
         
         st.success(f"✅ Successfully loaded {len(df)} players from USSSA!")
@@ -90,7 +90,6 @@ def scrape_and_process(url: str) -> pd.DataFrame:
         if 'dfs' in locals():
             st.info(f"Found {len(dfs)} tables on the page. Largest had {len(max(dfs, key=len))} rows.")
         return pd.DataFrame()
-
 def load_data(force_refresh=False):
     url = st.session_state.get("custom_url", DEFAULT_URL)
     if force_refresh or st.session_state.player_df is None or st.session_state.player_df.empty:
